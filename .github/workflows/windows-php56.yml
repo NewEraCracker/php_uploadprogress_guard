@@ -92,6 +92,29 @@ jobs:
           Write-Host $out
           if ($out -notmatch 'version => 3\.' -or $out -match 'Unable to load|Warning') { throw "DLL did not load" }
 
+      - name: Requests through php-cgi.exe (the binary IIS FastCGI runs)
+        shell: pwsh
+        run: |
+          $dll = (Get-ChildItem out\*.dll).FullName
+          $doc = "$env:RUNNER_TEMP\doc"; New-Item -ItemType Directory $doc -Force | Out-Null
+          Set-Content -Path "$doc\t.php" -Value '<?php echo "ok ", PHP_VERSION, " guard=", phpversion("hp_uploadprogress_guard") ?: "off", " post=", count($_POST), " files=", count($_FILES), " up=", ini_get("session.upload_progress.enabled"), "\n";'
+          $b = "--X`r`nContent-Disposition: form-data; name=`"a`"`r`n`r`n1`r`n--X`r`nContent-Disposition: form-data; name=`"f`"; filename=`"f.txt`"`r`nContent-Type: text/plain`r`n`r`nhello`r`n--X--`r`n"
+          [IO.File]::WriteAllBytes("$doc\body.bin", [Text.Encoding]::ASCII.GetBytes($b))
+          $fail = $false
+          foreach ($ext in @('', "-d extension=$dll")) {
+            foreach ($method in @('GET', 'POST')) {
+              $env:REDIRECT_STATUS = '200'; $env:GATEWAY_INTERFACE = 'CGI/1.1'; $env:SCRIPT_FILENAME = "$doc\t.php"; $env:REQUEST_METHOD = $method
+              if ($method -eq 'POST') { $env:CONTENT_TYPE = 'multipart/form-data; boundary=X'; $env:CONTENT_LENGTH = "$($b.Length)"; $in = "< `"$doc\body.bin`"" } else { $env:CONTENT_TYPE = ''; $env:CONTENT_LENGTH = ''; $in = '< NUL' }
+              $o = cmd /c "php56\php-cgi.exe -n $ext $in 2>&1" | Out-String
+              $rc = $LASTEXITCODE
+              $line = ($o -split "`n" | Where-Object { $_ -match '^ok ' }) -join ''
+              Write-Host ("{0,-6} {1,-4} exit={2} {3}" -f ($(if ($ext) { 'guard' } else { 'plain' })), $method, $rc, $line.Trim())
+              $want = if ($method -eq 'POST') { 'post=1 files=1' } else { 'post=0 files=0' }
+              if ($rc -ne 0 -or $line -notmatch $want -or ($ext -and $line -notmatch 'guard=3\.')) { $fail = $true; Write-Host $o }
+            }
+          }
+          if ($fail) { throw "php-cgi request failed" }
+
       - uses: actions/upload-artifact@v4
         with:
           name: php_hp_uploadprogress_guard-5.6-${{ matrix.ts }}-vc11-${{ matrix.arch }}
