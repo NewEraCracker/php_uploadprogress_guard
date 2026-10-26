@@ -175,6 +175,7 @@ fetch ansible/mods-available-$NAME.ini "$WORK/$NAME.ini" || die "cannot download
 if [ -n "$BUNDLE" ]; then echo "Source: release bundle $BUNDLE ($(uname -m))"; else echo "Source: $REPO_RAW/$REF ($(uname -m))"; fi
 
 FAILED=0
+INSTALLED=0
 for v in "${VERSIONS[@]}"; do
 	php="/usr/bin/php$v"
 	file="$NAME-$v$SUFFIX.so"
@@ -184,22 +185,29 @@ for v in "${VERSIONS[@]}"; do
 	if ! (cd "$WORK" && grep " $file\$" SHA256SUMS | sha256sum -c --quiet - >/dev/null 2>&1); then
 		echo "PHP $v: checksum of $file does not match dist/SHA256SUMS, skipped (nothing changed)"; FAILED=1; continue
 	fi
-	# Load the new file in a separate process before anything points at it.
-	if ! "$php" -n -d "extension=$WORK/$file" --ri "$NAME" 2>/dev/null | grep -q '^version =>'; then
-		echo "PHP $v: $file does not load into $php, skipped (nothing changed)"; FAILED=1; continue
-	fi
 	extdir=$("$php" -n -r 'echo PHP_EXTENSION_DIR;')
 	[ -d "$extdir" ] || { echo "PHP $v: extension dir $extdir missing, skipped"; FAILED=1; continue; }
-	# New file under a temporary name, then rename: running workers keep the copy they mapped.
-	install -m 0644 "$WORK/$file" "$extdir/.$NAME.so.new"
-	mv -f "$extdir/.$NAME.so.new" "$extdir/$NAME.so"
+	# New file under a temporary name in the extension dir (the work dir may be on a noexec /tmp, where no
+	# library can be loaded), loaded in a separate process before anything points at it, then renamed into
+	# place: running workers keep the copy they mapped.
+	new="$extdir/.$NAME.so.new"
+	install -m 0644 "$WORK/$file" "$new"
+	if ! out=$("$php" -n -d "extension=$new" --ri "$NAME" 2>&1) || ! printf '%s\n' "$out" | grep -q '^version =>'; then
+		rm -f "$new"
+		echo "PHP $v: $file does not load into $php, skipped (nothing changed):"
+		printf '%s\n' "$out" | grep -m2 -iE 'warning|error|unable' | sed 's/^/    /'
+		FAILED=1; continue
+	fi
+	mv -f "$new" "$extdir/$NAME.so"
 	ini="/etc/php/$v/mods-available/$NAME.ini"
 	if [ -f "$ini" ]; then note="ini kept"; else install -m 0644 "$WORK/$NAME.ini" "$ini"; note="ini installed"; fi
 	phpenmod -v "$v" -s ALL "$NAME"
 	got=$("$php" --ri "$NAME" 2>/dev/null | sed -n 's/^version => //p')
 	[ -n "$got" ] || { echo "PHP $v: installed but not loaded by the CLI, check $ini"; FAILED=1; continue; }
 	echo "PHP $v: $NAME $got installed ($note: $ini)"
+	INSTALLED=$((INSTALLED + 1))
 done
 
+if [ "$INSTALLED" -eq 0 ]; then echo "Nothing installed."; exit 1; fi
 if [ "$RELOAD" -eq 1 ]; then reload_services present; else print_reload_hint; fi
 exit "$FAILED"
