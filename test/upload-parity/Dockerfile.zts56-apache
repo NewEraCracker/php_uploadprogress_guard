@@ -1,0 +1,11 @@
+# Thread-safe PHP 5.6.40 built as an Apache module, Apache with mpm_event (threaded). For zts-race.sh.
+FROM debian:12
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends apache2 apache2-dev build-essential autoconf curl ca-certificates bzip2 xz-utils pkg-config procps >/dev/null && rm -rf /var/lib/apt/lists/*
+RUN cd /tmp && curl -fsSL https://www.php.net/distributions/php-5.6.40.tar.xz -o p.txz && tar xJf p.txz && cd php-5.6.40 \
+ && CFLAGS="-O2 -g -fcommon -Wno-error -std=gnu99" ./configure --quiet --prefix=/opt/php --with-config-file-path=/etc/php56 --with-config-file-scan-dir=/etc/php56/conf.d \
+    --disable-all --enable-session --enable-filter --enable-cli --disable-cgi --enable-maintainer-zts --with-apxs2=/usr/bin/apxs >/tmp/cfg.log 2>&1 \
+ && make -s -j"$(nproc)" >/tmp/mk.log 2>&1 && make -s install >/dev/null 2>&1 && cd / && rm -rf /tmp/php-5.6.40 /tmp/p.txz
+RUN mkdir -p /etc/php56/conf.d && a2dismod -q mpm_prefork >/dev/null 2>&1; a2enmod -q mpm_event >/dev/null 2>&1; \
+    grep -q "LoadModule php5_module" /etc/apache2/apache2.conf || echo "LoadModule php5_module /usr/lib/apache2/modules/libphp5.so" >> /etc/apache2/apache2.conf; \
+    printf '<FilesMatch "\\.php$">\n  SetHandler application/x-httpd-php\n</FilesMatch>\n' > /etc/apache2/conf-enabled/php56.conf
